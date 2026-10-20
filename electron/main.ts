@@ -40,7 +40,7 @@ async function createWindow() {
     width: 1320, height: 900, minWidth: 1080, minHeight: 760,
     frame: false, backgroundColor: '#f7f8fa', show: false,
     icon: path.join(__dirname, '../../assets/icon.ico'),
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true },
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: !process.argv.includes('--smoke') },
   });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   window.webContents.on('will-navigate', event => event.preventDefault());

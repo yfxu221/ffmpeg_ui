@@ -4,6 +4,7 @@ import { promises as fs, constants } from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { EngineStatus, ExportOptions, JobProgress, MediaInfo, Settings } from '../shared/types';
+import { exportDuration } from '../shared/geometry';
 
 export interface Binaries { ffmpeg: string; ffprobe: string; }
 const captureChildren = new Set<ReturnType<typeof spawn>>();
@@ -79,30 +80,74 @@ export async function inspectMedia(input: string, binaries: Binaries): Promise<M
 }
 
 export function validateOptions(options: ExportOptions, media: MediaInfo): ExportOptions {
-  if (!options || !['convert', 'trim', 'compress'].includes(options.tool) || !['mp4', 'gif'].includes(options.format)) throw new Error('无效的处理类型。');
+  if (!options || !['convert', 'trim', 'compress', 'adjust', 'extract'].includes(options.tool) || !['mp4', 'gif', 'mp3', 'm4a', 'png'].includes(options.format)) throw new Error('无效的处理类型。');
+  const extraction = ['mp3', 'm4a', 'png'].includes(options.format);
+  if ((options.tool === 'extract') !== extraction) throw new Error('音频和单帧输出仅支持素材提取工具。');
+  if (['mp3', 'm4a'].includes(options.format) && !media.hasAudio) throw new Error('素材没有音轨，无法提取音频。请选择 PNG 单帧。');
   if (!['high', 'balanced', 'small'].includes(options.quality)) throw new Error('无效的质量预设。');
   for (const key of ['start', 'end', 'width', 'fps'] as const) if (typeof options[key] !== 'number' || !Number.isFinite(options[key])) throw new Error('参数必须为有效数字。');
-  if (options.start < 0 || options.end > media.duration + 0.05 || options.end - options.start < 0.04) throw new Error('结束时间必须大于开始时间，且位于媒体时长以内。');
+  const selectedEnd = Math.min(options.end, media.duration);
+  if (options.format !== 'png' && (options.start < 0 || options.end > media.duration + 0.05 || selectedEnd - options.start < 0.04)) throw new Error('结束时间必须大于开始时间，且位于媒体时长以内。');
   if (options.width !== 0 && (!Number.isInteger(options.width) || options.width < 16 || options.width > 7680)) throw new Error('输出宽度应为 16–7680 的整数，或选择原始尺寸。');
   if (options.fps !== 0 && (!Number.isInteger(options.fps) || options.fps < 1 || options.fps > 120)) throw new Error('帧率应为 1–120 的整数。');
   if (typeof options.outputDir !== 'string' || !path.isAbsolute(options.outputDir)) throw new Error('请选择有效的输出文件夹。');
   for (const key of ['mute', 'loop', 'fastTrim'] as const) if (typeof options[key] !== 'boolean') throw new Error('无效的导出选项。');
   if (options.fastTrim && (options.tool !== 'trim' || options.format !== 'mp4' || media.format !== 'mp4')) throw new Error('快速截取仅支持 MP4 → MP4。');
-  return { ...options, end: Math.min(options.end, media.duration) };
+  const effects = options.effects;
+  if (!effects || ![0, 90, 180, 270].includes(effects.rotation) || typeof effects.flipH !== 'boolean' || typeof effects.flipV !== 'boolean') throw new Error('无效的画面调整参数。');
+  if (typeof effects.speed !== 'number' || !Number.isFinite(effects.speed) || effects.speed < 0.25 || effects.speed > 4) throw new Error('倍速范围为 0.25–4。');
+  if (effects.crop !== null) {
+    const crop = effects.crop;
+    if (!crop || ['x', 'y', 'width', 'height'].some(key => !Number.isInteger(crop[key as keyof typeof crop]))) throw new Error('裁切位置和尺寸必须是整数。');
+    if (crop.x < 0 || crop.y < 0 || crop.width < 16 || crop.height < 16 || crop.x + crop.width > media.width || crop.y + crop.height > media.height) throw new Error('裁切范围须位于原画面内，宽高至少为 16 像素。');
+  }
+  if (options.tool !== 'adjust' && (effects.rotation || effects.flipH || effects.flipV || effects.speed !== 1 || effects.crop)) throw new Error('请在画面调整工具中使用旋转、镜像、裁切和倍速。');
+  if (typeof options.frameTime !== 'number' || !Number.isFinite(options.frameTime) || options.frameTime < 0 || options.frameTime >= media.duration) throw new Error('取帧时间须位于素材时长内，不能等于结束位置。');
+  return { ...options, end: selectedEnd };
+}
+
+function tempoFilter(speed: number): string {
+  const factors: number[] = [];
+  while (speed > 2) { factors.push(2); speed /= 2; }
+  while (speed < 0.5) { factors.push(0.5); speed /= 0.5; }
+  factors.push(speed);
+  return factors.map(value => `atempo=${value}`).join(',');
 }
 
 export function buildArguments(options: ExportOptions, output: string): string[] {
   const args = ['-hide_banner', '-loglevel', 'warning', '-nostdin', '-n', '-progress', 'pipe:1', '-stats_period', '0.3'];
   // Input seeking is frame accurate while transcoding; stream copy is explicitly approximate.
-  args.push('-ss', String(options.start));
+  args.push('-ss', String(options.format === 'png' ? options.frameTime : options.start));
   if (path.extname(options.input).toLowerCase() === '.gif') args.push('-ignore_loop', '1');
-  args.push('-i', options.input, '-t', String(options.end - options.start), '-map', '0:v:0');
+  if (options.tool === 'adjust') args.push('-t', String(options.end - options.start));
+  if (options.format === 'png') {
+    args.push('-i', options.input, '-map', '0:v:0', '-frames:v', '1', '-an', '-update', '1', output);
+    return args;
+  }
+  if (options.format === 'mp3' || options.format === 'm4a') {
+    args.push('-i', options.input, '-t', String(options.end - options.start), '-map', '0:a:0', '-vn');
+    if (options.format === 'mp3') args.push('-c:a', 'libmp3lame', '-q:a', '2');
+    else args.push('-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart');
+    args.push(output);
+    return args;
+  }
+  args.push('-i', options.input, '-t', String(exportDuration(options)), '-map', '0:v:0');
   if (options.fastTrim) {
     if (!options.mute) args.push('-map', '0:a?');
     args.push('-c', 'copy', '-avoid_negative_ts', 'make_zero', '-movflags', '+faststart', output);
     return args;
   }
   const filters: string[] = [];
+  if (options.tool === 'adjust') {
+    const { crop, rotation, flipH, flipV, speed } = options.effects;
+    if (crop) filters.push(`crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}:exact=1`);
+    if (rotation === 90) filters.push('transpose=clock');
+    if (rotation === 180) filters.push('hflip', 'vflip');
+    if (rotation === 270) filters.push('transpose=cclock');
+    if (flipH) filters.push('hflip');
+    if (flipV) filters.push('vflip');
+    if (speed !== 1) filters.push(`setpts=(PTS-STARTPTS)/${speed}`);
+  }
   if (options.fps) filters.push(`fps=${options.fps}`);
   if (options.format === 'gif') {
     if (options.width) filters.push(`scale=${options.width}:-1:flags=lanczos`);
@@ -115,7 +160,10 @@ export function buildArguments(options: ExportOptions, output: string): string[]
     filters.push('pad=ceil(iw/2)*2:ceil(ih/2)*2');
     filters.push('setsar=1');
     args.push('-vf', filters.join(','), '-c:v', 'libx264', '-preset', 'medium', '-crf', String({ high: 18, balanced: 23, small: 28 }[options.quality]), '-pix_fmt', 'yuv420p');
-    if (options.mute) args.push('-an'); else args.push('-c:a', 'aac', '-b:a', '128k');
+    if (options.mute) args.push('-an'); else {
+      args.push('-c:a', 'aac', '-b:a', '128k');
+      if (options.tool === 'adjust' && options.effects.speed !== 1) args.push('-af', `asetpts=PTS-STARTPTS,${tempoFilter(options.effects.speed)}`);
+    }
     args.push('-movflags', '+faststart', output);
   }
   return args;
@@ -128,7 +176,7 @@ export function displayCommand(executable: string, args: string[]): string {
 }
 
 function outputName(media: MediaInfo, options: ExportOptions): string {
-  const suffix = { convert: 'converted', trim: 'trimmed', compress: 'compressed' }[options.tool];
+  const suffix = { convert: 'converted', trim: 'trimmed', compress: 'compressed', adjust: 'adjusted', extract: options.format === 'png' ? `frame_${options.frameTime.toFixed(3).replace('.', '-')}` : 'audio' }[options.tool];
   return `${path.parse(media.name).name}_${suffix}.${options.format}`;
 }
 
@@ -189,7 +237,7 @@ export class MediaEngine extends EventEmitter {
           const lines = buffer.split(/\r?\n/); buffer = lines.pop() ?? '';
           for (const line of lines) {
             const [key, value] = line.split('=');
-            if (key === 'out_time_us' && Number.isFinite(Number(value))) current.progress.percent = Math.min(99, Math.max(0, Number(value) / 1e6 / (options.end - options.start) * 100));
+            if (key === 'out_time_us' && Number.isFinite(Number(value)) && exportDuration(options) > 0) current.progress.percent = Math.min(99, Math.max(0, Number(value) / 1e6 / exportDuration(options) * 100));
             if (key === 'speed') current.progress.speed = value?.trim() ?? '';
           }
         });

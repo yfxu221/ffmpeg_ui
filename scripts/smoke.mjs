@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import electron from 'electron';
+import { createRequire } from 'node:module';
+const appVersion = createRequire(import.meta.url)('../package.json').version;
 const packaged = process.argv.includes('--packaged');
 const env = { ...process.env, FRAMEFORGE_USER_DATA: path.resolve(packaged ? '.test-output/profile-portable' : '.test-output/profile') };
 delete env.ELECTRON_RUN_AS_NODE;
@@ -9,6 +11,6 @@ if (packaged) {
   for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key];
   env.Path = `${process.env.SystemRoot || 'C:\\Windows'}\\System32`;
 }
-const child = spawn(packaged ? path.resolve('release/FrameForge-win32-x64/FrameForge.exe') : electron, packaged ? ['--smoke'] : ['.', '--smoke'], { stdio: 'inherit', env, windowsHide: true });
+const child = spawn(packaged ? path.resolve(`release/v${appVersion}/FrameForge-win32-x64/FrameForge.exe`) : electron, packaged ? ['--smoke'] : ['.', '--smoke'], { stdio: 'inherit', env, windowsHide: true });
 child.on('error', error => { console.error('Desktop runtime could not start:', error); process.exit(1); });
 child.on('exit', code => process.exit(code ?? 1));
