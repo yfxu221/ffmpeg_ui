@@ -1,0 +1,39 @@
+.preview-toolbar { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 16px 0; }
+.workspace.has-media .page-heading { margin:22px 0 20px; }
+.workspace.has-media .eyebrow { display:none; }
+.workspace.has-media .page-heading h1 { font-size:24px; margin-bottom:9px; }
+.workspace.has-media .heading-symbol { width:42px; height:42px; border-radius:13px; }
+.workspace.has-media .source-preview { height:clamp(190px,26vh,330px); }
+.preview-tabs { display:flex; background:#f0f3f9; padding:3px; border-radius:6px; gap:2px; }
+.preview-tabs button { font-size:10px; color:#9aa6ba; padding:6px 11px; border-radius:4px; }
+.preview-tabs button.selected { background:#fff; color:#6388d4; box-shadow:0 1px 4px #30497510; }
+.preview-render-button { display:flex; align-items:center; gap:5px; font-size:10px; color:#6e92d7; padding:7px 0 7px 7px; }
+.preview-render-button:hover:not(:disabled) { color:#315fbd; }
+.source-preview { margin-top:12px; }
+.source-stage, .result-stage { position:absolute; inset:0; }
+.source-stage[hidden] { display:none; }
+.source-stage video, .source-stage .source-frame-image { position:absolute; inset:0; }
+.source-stage .source-frame-image { pointer-events:none; }
+.frame-loading-badge { position:absolute; right:10px; bottom:10px; display:flex; align-items:center; gap:5px; padding:6px 8px; color:#d5e4ff; background:#172d4cc9; border-radius:4px; font-size:9px; pointer-events:none; }
+.preview-loading { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:12px; padding:25px; color:#92a5c7; background:#171e2a; }
+.preview-loading strong { font-size:12px; font-weight:500; }
+.preview-loading p { margin:0; font-size:11px; line-height:1.8; max-height:130px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+.preview-loading button { background:#263750; color:#a4bcdf; border-color:#3d5474; }
+.preview-range-row { display:flex; align-items:center; justify-content:space-between; padding:2px 18px 13px; gap:8px; min-height:32px; }
+.preview-range-row > span { display:flex; align-items:center; gap:5px; color:#a0aec5; font-size:9px; line-height:1.7; }
+.preview-range-row button { display:flex; align-items:center; gap:5px; font-size:9px; color:#849cc5; white-space:nowrap; padding:4px 0 4px 8px; }
+.preview-range-row button.selected { color:#3971d7; }
+.preview-notice { background:#f4f7fd; font-size:10px; color:#879bc0; line-height:1.7; padding:8px 17px; margin:0 15px 12px; border-radius:5px; }
+.result-stage video { cursor:default; }
+.result-caption { font-size:9px; line-height:1.8; color:#9eacc2; padding:11px 19px; }
+.audio-result { height:100%; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:17px; color:#a0b4d7; }
+.audio-result strong { font-size:12px; font-weight:500; }
+.audio-result audio { width:85%; height:35px; }
+.github-project { margin-top:20px; padding:16px 18px; background:#f6f8fc; border:1px solid #e6ecf6; border-radius:8px; }
+.github-project strong, .github-project small { display:block; }
+.github-project strong { font-weight:500; color:#7a8ba7; font-size:11px; margin-bottom:9px; }
+.github-project a { display:block; color:#527dce; font-size:12px; text-decoration:none; overflow-wrap:anywhere; }
+.github-project a:hover { text-decoration:underline; }
+.github-project small { font-size:10px; color:#a5b0c2; margin-top:10px; }
+@media(max-width:1170px) { .preview-workspace .player-controls { gap:4px; padding:0 10px; } .preview-workspace .player-time { font-size:8px; } .preview-range-row { padding-left:13px; padding-right:13px; flex-wrap:wrap; } }
+@media(max-height:820px) { .workspace.has-media .page-heading { margin:16px 0; } .workspace.has-media .page-heading p { display:none; } }

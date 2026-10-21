@@ -1,0 +1,90 @@
+const { test, before, after } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const { capture, resolveBinaries, inspectMedia } = require('../dist-electron/electron/engine.js');
+const { PreviewManager } = require('../dist-electron/electron/previews.js');
+const { NEUTRAL_EFFECTS } = require('../dist-electron/shared/geometry.js');
+const { frameTimeAt, stepFrame } = require('../dist-electron/shared/timeline.js');
+const root = path.resolve('.test-output/preview-tests');
+const gif = path.join(root,'variable.gif');
+const longGif = path.join(root,'long.gif');
+let binaries, manager, media;
+const options = extra => ({ input:gif, tool:'trim', format:'gif', width:0, fps:0, start:0, end:1.1, quality:'balanced', mute:false, loop:true, fastTrim:false, outputDir:root, effects:{...NEUTRAL_EFFECTS}, frameTime:0, ...extra });
+const probe = async file => JSON.parse(await capture(binaries.ffprobe,['-v','error','-show_format','-show_streams','-of','json',file]));
+before(async () => {
+  await fs.mkdir(root,{recursive:true});
+  binaries = await resolveBinaries({ffmpegPath:'',ffprobePath:'',outputDir:''});
+  await capture(binaries.ffmpeg,['-v','error','-y','-f','lavfi','-i','testsrc2=size=96x64:rate=10:duration=0.4','-vf',"setpts='if(eq(N,0),0,if(eq(N,1),0.1/TB,if(eq(N,2),0.4/TB,0.9/TB)))'",'-fps_mode','vfr','-enc_time_base','1:100','-final_delay','20',gif]);
+  await capture(binaries.ffmpeg,['-v','error','-y','-f','lavfi','-i','testsrc2=size=32x24:rate=1:duration=33','-final_delay','100',longGif]);
+  media = await inspectMedia(gif,binaries);
+  manager = new PreviewManager(root);
+});
+after(async () => { await manager?.dispose(); });
+test('variable GIF timeline uses real frame timestamps and containing-frame selection', () => {
+  assert.deepEqual(media.frameTimes,[0,0.1,0.4,0.9]);
+  assert.ok(Math.abs(media.duration-1.1)<0.01);
+  assert.equal(frameTimeAt(media,0.3),0.1); assert.equal(frameTimeAt(media,0.899),0.4);
+  assert.equal(frameTimeAt(media,0.399999),0.1);
+  assert.equal(stepFrame(media,0.1,1),0.4); assert.equal(stepFrame(media,0.4,-1),0.1);
+  assert.equal(stepFrame(media,1.1,1),0.9);
+});
+test('full GIF playback proxy preserves timing, the final hold, and content after 30 seconds', async () => {
+  const source = await manager.source(gif,binaries);
+  assert.ok(Math.abs(source.duration-media.duration)<0.03, `${source.duration} vs ${media.duration}`);
+  const raw = JSON.parse(await capture(binaries.ffprobe,['-v','error','-select_streams','v:0','-show_frames','-show_entries','frame=pts_time','-of','json',source.path]));
+  assert.deepEqual(raw.frames.slice(0,4).map(frame=>Number(frame.pts_time)),media.frameTimes);
+  const long = await manager.source(longGif,binaries);
+  assert.ok(long.duration>32.9, `Truncated proxy: ${long.duration}`);
+});
+test('single-frame preview and PNG output use the same GIF frame, not the next frame', async () => {
+  const frame = await manager.frame(gif,0.3,binaries);
+  const result = await manager.result(options({tool:'extract',format:'png',frameTime:0.3}),binaries);
+  assert.equal(frame.time,0.1); assert.equal(result.time,0.1);
+  const hash = file => capture(binaries.ffmpeg,['-v','error','-i',file,'-frames:v','1','-vf','format=rgb24','-f','md5','pipe:1']);
+  assert.equal(await hash(frame.path),await hash(result.path));
+  const next = await manager.frame(gif,0.4,binaries);
+  assert.notEqual(await hash(frame.path),await hash(next.path));
+  const again = await manager.frame(gif,0.3,binaries);
+  assert.equal(again.path,frame.path);
+});
+test('selected GIF result has its own seekable player and uses real export settings', async () => {
+  const result = await manager.result(options({start:0.1,end:0.5,fps:10,width:48}),binaries);
+  assert.ok(result.playbackPath);
+  const output = await probe(result.path), playback = await probe(result.playbackPath);
+  assert.equal(output.streams[0].width,48);
+  assert.ok(Math.abs(Number(playback.format.duration)-Number(output.format.duration))<0.04);
+  assert.ok(Number(output.format.duration)<0.6);
+  const variable = await manager.result(options({start:0.1,end:0.5}),binaries);
+  assert.ok(Math.abs(variable.duration-0.4)<0.01, `Incorrect final GIF hold: ${variable.duration}`);
+  const middle = await manager.result(options({start:0.3,end:0.6}),binaries);
+  assert.ok(Math.abs(middle.duration-0.3)<0.01, `Incorrect in-frame trim: ${middle.duration}`);
+  const expected = await manager.frame(gif,0.3,binaries);
+  const firstHash = file => capture(binaries.ffmpeg,['-v','error','-i',file,'-frames:v','1','-vf','format=rgb24','-f','md5','pipe:1']);
+  assert.equal(await firstHash(middle.path),await firstHash(expected.path));
+  const boundary = await manager.result(options({start:0,end:0.4}),binaries);
+  assert.ok(Math.abs(boundary.duration-0.4)<0.01, `Incorrect exclusive end boundary: ${boundary.duration}`);
+});
+test('adjusted preview applies crop, rotation and speed without publishing an output file', async () => {
+  const published = (await fs.readdir(root)).filter(name=>name.includes('_adjusted')||name.includes('_frame_'));
+  const result = await manager.result(options({tool:'adjust',format:'mp4',fps:20,effects:{...NEUTRAL_EFFECTS,crop:{x:0,y:0,width:32,height:24},rotation:90,speed:2}}),binaries);
+  const output = await probe(result.path);
+  assert.equal(output.streams[0].width,24); assert.equal(output.streams[0].height,32);
+  assert.ok(Math.abs(Number(output.format.duration)-0.55)<0.1);
+  assert.deepEqual((await fs.readdir(root)).filter(name=>name.includes('_adjusted')||name.includes('_frame_')),published);
+});
+test('new frame requests cannot be replaced by stale completions', async () => {
+  const first = manager.frame(gif,0,binaries).catch(error=>error);
+  const latest = manager.frame(gif,0.9,binaries);
+  await first;
+  assert.equal((await latest).time,0.9);
+});
+test('cancelling result generation kills FFmpeg and removes partial previews', async () => {
+  const local = new PreviewManager(root);
+  const pending = local.result(options({input:longGif,tool:'adjust',format:'mp4',end:33,width:1920,fps:60}),binaries).catch(error=>error);
+  await new Promise(resolve=>setTimeout(resolve,160));
+  await local.cancelResult();
+  const result = await pending;
+  assert.ok(result instanceof Error && result.message.includes('取消'),String(result));
+  await local.dispose();
+});

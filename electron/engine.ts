@@ -5,22 +5,26 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { EngineStatus, ExportOptions, JobProgress, MediaInfo, Settings } from '../shared/types';
 import { exportDuration } from '../shared/geometry';
+import { frameTimeAt } from '../shared/timeline';
 
 export interface Binaries { ffmpeg: string; ffprobe: string; }
 const captureChildren = new Set<ReturnType<typeof spawn>>();
 export function stopCaptures() { for (const child of captureChildren) child.kill(); }
-export function capture(executable: string, args: string[], timeout = 30000): Promise<string> {
+export function capture(executable: string, args: string[], timeout = 30000, signal?: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new Error('预览已取消')); return; }
     const child = spawn(executable, args, { windowsHide: true, shell: false });
     captureChildren.add(child);
     child.once('close', () => captureChildren.delete(child));
-    let stdout = '', stderr = '', settled = false;
-    const finish = (error?: Error) => { if (settled) return; settled = true; clearTimeout(timer); error ? reject(error) : resolve(stdout); };
-    const timer = setTimeout(() => { child.kill(); finish(new Error('读取媒体信息超时，请确认文件和 FFmpeg 路径。')); }, timeout);
+    let stdout = '', stderr = '', settled = false, timedOut = false;
+    const abort = () => child.kill();
+    signal?.addEventListener('abort', abort, { once: true });
+    const finish = (error?: Error) => { if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); error ? reject(error) : resolve(stdout); };
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeout);
     child.stdout.on('data', data => { stdout += data; if (stdout.length > 8_000_000) { child.kill(); finish(new Error('媒体信息过大。')); } });
     child.stderr.on('data', data => { stderr = (stderr + data).slice(-12000); });
     child.on('error', error => finish(new Error(`无法运行 ${path.basename(executable)}：${error.message}`)));
-    child.on('close', code => finish(code === 0 ? undefined : new Error(stderr || `进程退出，代码 ${code}`)));
+    child.on('close', code => finish(signal?.aborted ? new Error('预览已取消') : timedOut ? new Error('处理超时，请缩短预览范围或检查媒体文件。') : code === 0 ? undefined : new Error(stderr || `进程退出，代码 ${code}`)));
   });
 }
 
@@ -58,6 +62,7 @@ export async function checkEngine(settings: Settings, bundledDir?: string): Prom
   }
 }
 
+const gifTimelines = new Map<string, { stamp: string; times: number[] }>();
 export async function inspectMedia(input: string, binaries: Binaries): Promise<MediaInfo> {
   if (typeof input !== 'string' || !path.isAbsolute(input) || !/\.(mp4|gif)$/i.test(input)) throw new Error('请选择 MP4 或 GIF 文件。');
   const stat = await fs.stat(input);
@@ -70,12 +75,25 @@ export async function inspectMedia(input: string, binaries: Binaries): Promise<M
   const [num, den] = String(video.avg_frame_rate || video.r_frame_rate || '0/1').split('/').map(Number);
   const rotation = Number(video.side_data_list?.find((item: { rotation?: number }) => item.rotation !== undefined)?.rotation ?? video.tags?.rotate ?? 0);
   const rotated = Math.abs(rotation) % 180 === 90;
+  let frameTimes: number[] | undefined;
+  if (path.extname(input).toLowerCase() === '.gif') {
+    const stamp = `${stat.size}:${stat.mtimeMs}`;
+    const cached = gifTimelines.get(input);
+    if (cached?.stamp === stamp) frameTimes = cached.times;
+    else {
+      const packets = JSON.parse(await capture(binaries.ffprobe, ['-v','error','-select_streams','v:0','-show_packets','-show_entries','packet=pts_time','-of','json',input]));
+      frameTimes = [...new Set<number>((packets.packets ?? []).map((packet: { pts_time: string }) => Number(packet.pts_time)).filter((time: number) => Number.isFinite(time) && time >= 0 && time < duration))].sort((a,b) => a-b);
+      if (!frameTimes.length) frameTimes = [0];
+      if (gifTimelines.size >= 8) gifTimelines.delete(gifTimelines.keys().next().value!);
+      gifTimelines.set(input, { stamp, times: frameTimes });
+    }
+  }
   return {
     path: path.resolve(input), name: path.basename(input), size: stat.size, duration,
     width: Number(rotated ? video.height : video.width), height: Number(rotated ? video.width : video.height),
     fps: den ? num / den : 0, codec: video.codec_name ?? 'unknown',
     hasAudio: Boolean(raw.streams?.some((stream: { codec_type: string }) => stream.codec_type === 'audio')),
-    format: path.extname(input).toLowerCase() === '.gif' ? 'gif' : 'mp4', url: '',
+    format: path.extname(input).toLowerCase() === '.gif' ? 'gif' : 'mp4', url: '', frameTimes,
   };
 }
 
@@ -103,7 +121,23 @@ export function validateOptions(options: ExportOptions, media: MediaInfo): Expor
   }
   if (options.tool !== 'adjust' && (effects.rotation || effects.flipH || effects.flipV || effects.speed !== 1 || effects.crop)) throw new Error('请在画面调整工具中使用旋转、镜像、裁切和倍速。');
   if (typeof options.frameTime !== 'number' || !Number.isFinite(options.frameTime) || options.frameTime < 0 || options.frameTime >= media.duration) throw new Error('取帧时间须位于素材时长内，不能等于结束位置。');
-  return { ...options, end: selectedEnd };
+  const sourceStart = media.format === 'gif' ? frameTimeAt(media, options.start) : options.start;
+  const sourceOffset = Math.max(0, options.start - sourceStart);
+  let gifFinalDelay: number | undefined;
+  if (options.format === 'gif') {
+    const speed = options.tool === 'adjust' ? effects.speed : 1;
+    const duration = (selectedEnd - options.start) / speed;
+    let lastTime = 0;
+    if (!options.fps && media.frameTimes?.length) {
+      const last = frameTimeAt(media, selectedEnd - 0.000001);
+      lastTime = Math.max(0, (last - options.start) / speed);
+    } else {
+      const rate = options.fps || media.fps || 25;
+      lastTime = Math.max(0, Math.ceil(duration * rate - 0.000001) - 1) / rate;
+    }
+    gifFinalDelay = Math.max(1, Math.round(duration * 100) - Math.round(lastTime * 100));
+  }
+  return { ...options, end: selectedEnd, frameTime: options.format === 'png' ? frameTimeAt(media, options.frameTime) : options.frameTime, sourceStart, sourceOffset, gifFinalDelay };
 }
 
 function tempoFilter(speed: number): string {
@@ -117,9 +151,9 @@ function tempoFilter(speed: number): string {
 export function buildArguments(options: ExportOptions, output: string): string[] {
   const args = ['-hide_banner', '-loglevel', 'warning', '-nostdin', '-n', '-progress', 'pipe:1', '-stats_period', '0.3'];
   // Input seeking is frame accurate while transcoding; stream copy is explicitly approximate.
-  args.push('-ss', String(options.format === 'png' ? options.frameTime : options.start));
+  args.push('-ss', String(options.format === 'png' ? options.frameTime : options.sourceStart ?? options.start));
   if (path.extname(options.input).toLowerCase() === '.gif') args.push('-ignore_loop', '1');
-  if (options.tool === 'adjust') args.push('-t', String(options.end - options.start));
+  if (options.tool === 'adjust') args.push('-t', String(options.end - options.start + (options.sourceOffset || 0)));
   if (options.format === 'png') {
     args.push('-i', options.input, '-map', '0:v:0', '-frames:v', '1', '-an', '-update', '1', output);
     return args;
@@ -138,6 +172,7 @@ export function buildArguments(options: ExportOptions, output: string): string[]
     return args;
   }
   const filters: string[] = [];
+  if (options.sourceOffset) filters.push(`setpts=max(0\\,PTS-STARTPTS-${options.sourceOffset}/TB)`);
   if (options.tool === 'adjust') {
     const { crop, rotation, flipH, flipV, speed } = options.effects;
     if (crop) filters.push(`crop=${crop.width}:${crop.height}:${crop.x}:${crop.y}:exact=1`);
@@ -153,7 +188,9 @@ export function buildArguments(options: ExportOptions, output: string): string[]
     if (options.width) filters.push(`scale=${options.width}:-1:flags=lanczos`);
     // Per-frame palettes avoid buffering the entire selected clip in memory.
     filters.push('split[a][b];[a]palettegen=stats_mode=single[p];[b][p]paletteuse=new=1:dither=sierra2_4a');
-    args.push('-vf', filters.join(','), '-an', '-loop', options.loop ? '0' : '-1', output);
+    args.push('-vf', filters.join(','), '-an', '-loop', options.loop ? '0' : '-1');
+    if (options.gifFinalDelay) args.push('-final_delay', String(options.gifFinalDelay));
+    args.push(output);
   } else {
     if (!options.mute) args.push('-map', '0:a?');
     if (options.width) filters.push(`scale=${options.width}:-2:flags=lanczos`);

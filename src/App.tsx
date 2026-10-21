@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState, type DragEvent, type ReactNod
 import { ArrowDownToLine, ArrowLeftRight, ArrowRight, AudioLines, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, Clapperboard, Code2, Copy, FileVideo2, Film, Folder, FolderOpen, HardDrive, Image, LoaderCircle, Maximize2, Minimize2, Minus, MonitorPlay, Pause, Play, Plus, RotateCcw, Scissors, Settings2, ShieldCheck, Sparkles, Upload, X, Zap } from 'lucide-react';
 import type { EngineStatus, ExportOptions, JobProgress, MediaInfo, OutputFormat, Settings, Tool, VideoEffects } from '../shared/types';
 import { NEUTRAL_EFFECTS, exportDuration } from '../shared/geometry';
-import { AdjustmentPanel, CropOverlay, cropIsValid } from './Adjustments';
+import { AdjustmentPanel, cropIsValid } from './Adjustments';
 import ExportSettings from './ExportSettings';
+import MediaPreview from './MediaPreview';
+import { frameTimeAt } from '../shared/timeline';
 
 const tools = [
   { id: 'convert' as const, title: '格式转换', icon: ArrowLeftRight, heading: '换个格式，继续精彩。', description: 'MP4 与 GIF 轻松互转，让画面去到你想去的地方。' },
@@ -67,13 +69,7 @@ export default function App() {
   const [command, setCommand] = useState('');
   const [copied, setCopied] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [playing, setPlaying] = useState(false);
-  const [previewError, setPreviewError] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState('');
   const [generatingPreview, setGeneratingPreview] = useState(false);
-  const [previewProxy, setPreviewProxy] = useState(false);
-  const video = useRef<HTMLVideoElement>(null);
-  const previewContainer = useRef<HTMLDivElement>(null);
   const dragDepth = useRef(0);
   const importing = useRef(false);
   const busy = starting || job?.state === 'running';
@@ -104,7 +100,7 @@ export default function App() {
       const nextFormat = defaultFormat(tool, info);
       setFormat(nextFormat); setWidth(nextFormat === 'gif' && tool === 'convert' && info.width >= 16 ? Math.min(640, info.width) : 0); setFps(nextFormat === 'gif' && tool === 'convert' ? 15 : 0);
       setEffects({ ...NEUTRAL_EFFECTS }); setFrameTime(0);
-      setFastTrim(false); setCurrentTime(0); setPlaying(false); setPreviewError(false); setPreviewProxy(false); setPreviewUrl(info.url);
+      setFastTrim(false); setCurrentTime(0);
       setOutputDir(settings.outputDir || directoryOf(info.path));
       document.querySelector('.workspace')?.scrollTo({ top: 0, behavior: 'instant' });
     } catch (error) { setError(errorMessage(error)); }
@@ -129,7 +125,7 @@ export default function App() {
     setWidth(nextFormat === 'gif' && next === 'convert' && (media?.width ?? 640) >= 16 ? Math.min(640, media?.width ?? 640) : 0);
     setFps(nextFormat === 'gif' && next === 'convert' ? 15 : 0);
     setEffects({ ...NEUTRAL_EFFECTS });
-    setFrameTime(media ? Math.round(Math.min(currentTime, Math.max(0, media.duration - 1 / Math.max(1, media.fps))) * 1000) / 1000 : 0);
+    setFrameTime(media ? frameTimeAt(media, currentTime) : 0);
   }
   function changeFormat(next: OutputFormat) {
     setFormat(next); setFastTrim(false); setCommand('');
@@ -154,15 +150,9 @@ export default function App() {
   async function chooseOutput() {
     try { const selected = await window.desktop.selectDirectory(); if (selected) setOutputDir(selected); } catch (error) { setError(errorMessage(error)); }
   }
-  async function proxyPreview() {
-    if (!media) return;
-    setGeneratingPreview(true); setError('');
-    try { setPreviewUrl(await window.desktop.preview(media.path)); setPreviewError(false); setPreviewProxy(true); }
-    catch (error) { setError(errorMessage(error)); }
-    finally { setGeneratingPreview(false); }
+  function selectFrameTime(time: number) {
+    setFrameTime(media && time >= 0 && time < media.duration ? frameTimeAt(media, time) : time);
   }
-  function seek(time: number) { setCurrentTime(time); if (video.current) video.current.currentTime = Math.min(time, video.current.duration || time); }
-  function togglePlayback() { if (video.current) { if (video.current.paused) void video.current.play().catch(() => setPreviewError(true)); else video.current.pause(); } }
   async function safeFileAction(action: 'open' | 'reveal', input: string) {
     try { await window.desktop[action](input); } catch (error) { setError(errorMessage(error)); }
   }
@@ -191,9 +181,9 @@ export default function App() {
         <div className="nav-section-label">工作空间</div>
         <nav aria-label="媒体工具">{tools.map(item => <button key={item.id} disabled={busy} className={`nav-item ${tool === item.id ? 'active' : ''}`} onClick={() => selectTool(item.id)}><item.icon size={18}/><span>{item.title}</span>{tool === item.id && <span className="nav-active-dot"/>}</button>)}</nav>
         <div className="sidebar-note"><div className="note-symbol"><Sparkles size={17}/></div><strong>小工具，大有可为。</strong><p>把繁琐交给工具，<br/>把时间留给创作。</p><div className="note-formats"><span>MP4</span><ArrowLeftRight size={12}/><span>GIF</span></div></div>
-        <div className="sidebar-bottom"><button className="nav-item" onClick={() => setSettingsOpen(true)} disabled={busy}><Settings2 size={18}/><span>偏好设置</span></button><button className="nav-item" onClick={() => setHelpOpen(true)}><CircleHelp size={18}/><span>使用指南</span></button><div className="sidebar-version"><span className={`status-dot ${engine?.ready ? 'ready' : ''}`}/><span>FrameForge</span><small>v0.2.0</small></div></div>
+        <div className="sidebar-bottom"><button className="nav-item" onClick={() => setSettingsOpen(true)} disabled={busy}><Settings2 size={18}/><span>偏好设置</span></button><button className="nav-item" onClick={() => setHelpOpen(true)}><CircleHelp size={18}/><span>使用指南</span></button><div className="sidebar-version"><span className={`status-dot ${engine?.ready ? 'ready' : ''}`}/><span>FrameForge</span><small>v0.3.0</small></div></div>
       </aside>
-      <main className="workspace">
+      <main className={`workspace ${media ? 'has-media' : ''}`}>
         <div className="breadcrumb-row"><div className="breadcrumb">工作空间<ChevronRight size={13}/><span>{activeTool.title}</span></div><span className="local-badge"><ShieldCheck size={13}/>本地处理 · 无需上传</span></div>
         <section className="page-heading"><div><div className="eyebrow">A LITTLE TOOL. A LOT OF POSSIBILITIES.</div><h1>{activeTool.heading}</h1><p>{activeTool.description}</p></div><span className="heading-symbol"><activeTool.icon size={26} strokeWidth={1.4}/></span></section>
         {error && <div className="error-banner" role="alert"><span>{error}</span><IconButton label="关闭提示" onClick={() => setError('')}><X size={15}/></IconButton></div>}
@@ -208,24 +198,19 @@ export default function App() {
               <button className="primary-button import-button" disabled={loading || busy} onClick={() => void importFile()}>{loading ? <LoaderCircle className="spin" size={16}/> : <FolderOpen size={16}/>}<span>{loading ? '正在读取素材…' : '选择文件'}</span><kbd>Ctrl O</kbd></button>
               <div className="supported-formats"><span>MP4</span><span>GIF</span><i/>所有处理均在你的电脑上完成</div>
             </div> : <>
-              <div ref={previewContainer} className={`media-preview ${previewError ? 'failed-preview' : ''}`}>
-                {previewError ? <div className="preview-fallback"><MonitorPlay size={34}/><strong>这个编码暂时无法直接预览</strong><p>仍可正常导出，或生成前 30 秒的静音兼容预览。</p><button className="secondary-button" disabled={generatingPreview || busy} onClick={() => void proxyPreview()}>{generatingPreview ? <LoaderCircle className="spin" size={15}/> : <Play size={15}/>} {generatingPreview ? '正在生成预览…' : '生成兼容预览'}</button></div> : media.format === 'gif' && !previewProxy ? <img src={previewUrl} alt={media.name} onError={() => setPreviewError(true)}/> : <video key={previewUrl} ref={video} src={previewUrl} playsInline preload="metadata" onTimeUpdate={event => setCurrentTime(event.currentTarget.currentTime)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={() => setPlaying(false)} onError={() => setPreviewError(true)} onClick={togglePlayback}/>}
-                {tool === 'adjust' && effects.crop && !previewError && <CropOverlay container={previewContainer} media={media} crop={effects.crop} disabled={Boolean(busy)} onChange={crop => setEffects(value => ({ ...value, crop }))}/>}
-                <span className="preview-label">{previewProxy ? '兼容预览 · 前 30 秒 · 静音' : media.format === 'gif' ? 'GIF 动画预览' : '原始素材'}</span>
-              </div>
-              <div className="player-controls"><IconButton label={playing ? '暂停' : '播放'} disabled={media.format === 'gif' && !previewProxy || previewError} onClick={togglePlayback}>{playing ? <Pause size={16} fill="currentColor"/> : <Play size={16} fill="currentColor"/>}</IconButton><span className="player-time">{timeLabel(currentTime)}</span><input aria-label="预览播放位置" className="seek-range" type="range" min={0} max={previewProxy ? Math.min(30, media.duration) : media.duration} step={0.01} value={Math.min(currentTime, media.duration)} disabled={media.format === 'gif' && !previewProxy || previewError} onChange={event => seek(Number(event.target.value))}/><span className="player-time muted">{timeLabel(previewProxy ? Math.min(30, media.duration) : media.duration)}</span><IconButton label="重播" onClick={() => seek(0)} disabled={media.format === 'gif' && !previewProxy}><RotateCcw size={14}/></IconButton></div>
+              <MediaPreview key={media.url} media={media} options={options()} disabled={Boolean(busy)} invalid={Boolean(selectionError || adjustmentsError || frameError)} currentTime={currentTime} onPosition={setCurrentTime} onFrameTime={selectFrameTime} onEffects={setEffects} onBusyChange={setGeneratingPreview}/>
               <div className="media-file-row"><div className="media-file-icon"><FileVideo2 size={19}/></div><div><strong title={media.path}>{media.name}</strong><span>{sizeLabel(media.size)}<i/> {media.width} × {media.height}<i/>{media.fps.toFixed(2).replace(/\.00$/, '')} fps</span></div><span className="duration-badge">{timeLabel(media.duration)}</span></div>
             </>}
             <div className="selection-panel"><div className="selection-heading"><span><Scissors size={14}/>处理范围</span><small>{isStill ? '单帧使用右侧取帧时间' : media ? `已选 ${selectedDuration.toFixed(2)} 秒` : '导入后可设置开始与结束时间'}</small></div>
               <div className="selection-track"><div className="selection-fill" style={{ left: `${media ? start / media.duration * 100 : 0}%`, right: `${media ? (1 - end / media.duration) * 100 : 0}%` }}/><input aria-label="范围开始滑块" type="range" min={0} max={media?.duration || 1} step={0.01} value={start} disabled={!media || busy || isStill} onChange={event => { const next = Number(event.target.value); setStart(Math.max(0, Math.min(next, end - 0.04))); }}/><input aria-label="范围结束滑块" type="range" min={0} max={media?.duration || 1} step={0.01} value={end || 1} disabled={!media || busy || isStill} onChange={event => setEnd(Math.min(media?.duration ?? 1, Math.max(Number(event.target.value), start + 0.04)))}/></div>
               <div className="time-fields"><label><span>开始</span><input aria-label="开始时间（秒）" type="number" min={0} max={end} step={0.01} value={Number(start.toFixed(3))} disabled={!media || busy || isStill} onChange={event => setStart(Number(event.target.value))}/><small>秒</small></label><ArrowRight size={14}/><label><span>结束</span><input aria-label="结束时间（秒）" type="number" min={start} max={media?.duration || 0} step={0.01} value={Number(end.toFixed(3))} disabled={!media || busy || isStill} onChange={event => setEnd(Number(event.target.value))}/><small>秒</small></label><IconButton label="重置为完整时长" disabled={!media || busy || isStill} onClick={() => { setStart(0); setEnd(media?.duration || 0); }}><RotateCcw size={14}/></IconButton></div>
-              {media && media.format === 'mp4' && !isStill && <div className="set-time-row"><button disabled={busy || previewError} onClick={() => setStart(Math.min(currentTime, end - 0.04))}>当前位置设为开始</button><button disabled={busy || currentTime <= start} onClick={() => setEnd(Math.min(media.duration, Math.max(currentTime, start + 0.04)))}>当前位置设为结束</button></div>}
+              {media && !isStill && <div className="set-time-row"><button disabled={busy} onClick={() => setStart(Math.max(0, Math.min(currentTime, end - 0.04)))}>当前位置设为开始</button><button disabled={busy || currentTime <= start} onClick={() => setEnd(Math.min(media.duration, Math.max(currentTime, start + 0.04)))}>当前位置设为结束</button></div>}
               {frameError && <small className="inline-error">取帧时间须位于素材时长内，不能等于结束位置。</small>}
               {selectionError && <small className="inline-error">请选择有效范围，结束时间须大于开始时间。</small>}
             </div>
             {tool === 'adjust' && media && <AdjustmentPanel media={media} effects={effects} disabled={Boolean(busy)} onChange={setEffects}/>}
           </section>
-          <ExportSettings media={media} tool={tool} format={format} width={width} fps={fps} quality={quality} mute={mute} loop={loop} fastTrim={fastTrim} effects={effects} frameTime={frameTime} duration={outputDuration} busy={Boolean(busy)} canUseCurrent={Boolean(!previewError && media?.format === 'mp4')} onFormat={changeFormat} onWidth={setWidth} onFps={setFps} onQuality={setQuality} onMute={setMute} onLoop={setLoop} onFastTrim={setFastTrim} onSpeed={speed => setEffects(value => ({ ...value, speed }))} onFrameTime={setFrameTime} onUseCurrent={() => setFrameTime(Math.round(Math.min(currentTime, Math.max(0, media!.duration - 1 / Math.max(1, media!.fps))) * 1000) / 1000)}/>
+          <ExportSettings media={media} tool={tool} format={format} width={width} fps={fps} quality={quality} mute={mute} loop={loop} fastTrim={fastTrim} effects={effects} frameTime={frameTime} duration={outputDuration} busy={Boolean(busy)} canUseCurrent={Boolean(media)} onFormat={changeFormat} onWidth={setWidth} onFps={setFps} onQuality={setQuality} onMute={setMute} onLoop={setLoop} onFastTrim={setFastTrim} onSpeed={speed => setEffects(value => ({ ...value, speed }))} onFrameTime={selectFrameTime} onUseCurrent={() => selectFrameTime(currentTime)}/>
 
         </div>
         <section className="export-bar"><div className="output-location"><div className="folder-symbol"><Folder size={21}/></div><div><span>保存到</span><button disabled={busy} onClick={() => void chooseOutput()} title={outputDir || '选择输出文件夹'}>{outputDir || '导入后默认保存到原文件夹'}<ChevronDown size={12}/></button></div></div><div className="export-actions"><IconButton label="查看 PowerShell 命令" disabled={!media || busy} onClick={() => void showCommand()}><Code2 size={18}/></IconButton><span className="vertical-divider"/>{busy ? <button className="secondary-button cancel-button" disabled={cancelling || starting} onClick={() => void cancel()}>{cancelling ? <LoaderCircle className="spin" size={15}/> : <X size={15}/>} {cancelling ? '正在取消…' : '取消处理'}</button> : <button className="primary-button export-button" disabled={!media || loading || generatingPreview || !engine?.ready || Boolean(selectionError || adjustmentsError || frameError)} onClick={() => void exportFile()}><ArrowDownToLine size={17}/>开始处理<ArrowRight size={16}/></button>}</div></section>
@@ -236,7 +221,7 @@ export default function App() {
     {dragging && <div className="drop-overlay"><div><Upload size={38}/><h2>松开，开始你的下一帧。</h2><p>支持一个 MP4 或 GIF 文件</p></div></div>}
     {settingsOpen && <SettingsModal settings={settings} onClose={() => setSettingsOpen(false)} onSave={async next => { const saved = await window.desktop.saveSettings(next); setSettings(saved); setOutputDir(saved.outputDir || (media ? directoryOf(media.path) : '')); setEngine(await window.desktop.engineStatus()); setSettingsOpen(false); }}/>}
     {command && <Modal title="PowerShell 命令" icon={<Code2 size={19}/>} onClose={() => setCommand('')}><p className="modal-description">可复制到 PowerShell 执行。应用实际导出时使用临时文件，并自动避开同名文件。</p><pre className="command-code">{command}</pre><div className="modal-actions"><button className="primary-button" onClick={() => { void navigator.clipboard.writeText(command).then(() => setCopied(true)).catch(error => setError(errorMessage(error))); }}>{copied ? <Check size={15}/> : <Copy size={15}/>} {copied ? '已复制' : '复制命令'}</button></div></Modal>}
-    {helpOpen && <Modal title="几步，完成处理。" icon={<CircleHelp size={19}/>} onClose={() => setHelpOpen(false)}><div className="help-steps">{[['01','导入素材','拖入一个 MP4 或 GIF，或者按 Ctrl + O 选择文件。'],['02','选择工具与参数','转换格式、截取片段或压缩尺寸；右侧设置会随工具变化。'],['03','开始处理','选好保存位置，等待导出完成，即可打开结果。']].map(([number,title,description]) => <div key={number}><span>{number}</span><section><strong>{title}</strong><p>{description}</p></section></div>)}</div><div className="help-note"><ShieldCheck size={18}/><p>默认保留原文件，重名结果自动编号。快速截取受关键帧影响，精确截取会重新编码。GIF 不含音频。兼容预览仅包含前 30 秒静音画面，导出仍使用原素材。</p></div><p className="modal-description">画面调整支持裁切、旋转、镜像和倍速；素材提取支持 MP3、M4A 与 PNG。一次处理一个文件，批量和 GPU 加速留待后续。</p></Modal>}
+    {helpOpen && <Modal title="几步，完成处理。" icon={<CircleHelp size={19}/>} onClose={() => setHelpOpen(false)}><div className="help-steps">{[['01','导入素材','拖入一个 MP4 或 GIF，或者按 Ctrl + O 选择文件。'],['02','选择工具与参数','转换格式、截取片段或压缩尺寸；右侧设置会随工具变化。'],['03','开始处理','选好保存位置，等待导出完成，即可打开结果。']].map(([number,title,description]) => <div key={number}><span>{number}</span><section><strong>{title}</strong><p>{description}</p></section></div>)}</div><div className="help-note"><ShieldCheck size={18}/><p>默认保留原文件，重名结果自动编号。快速截取受关键帧影响，精确截取会重新编码。GIF 支持暂停、拖动时间轴和逐帧切换；取帧时间与单帧画面同步。“播放所选片段”可循环核对范围，“预览处理结果”会应用当前导出参数。</p></div><p className="modal-description">画面调整支持裁切、旋转、镜像和倍速；素材提取支持 MP3、M4A 与 PNG。结果预览临时保存在本地，确认后点击“开始处理”保存正式文件。</p><div className="github-project"><strong>开源项目 · FrameForge</strong><a href="https://github.com/yfxu221/ffmpeg_ui" onClick={event => { event.preventDefault(); void window.desktop.openGithub().catch(error => setError(errorMessage(error))); }}>github.com/yfxu221/ffmpeg_ui ↗</a><small>查看源码、更新记录，或提交问题与建议。</small></div></Modal>}
   </div>;
 }
 

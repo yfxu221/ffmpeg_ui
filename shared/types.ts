@@ -9,7 +9,11 @@ export interface VideoEffects {
 export interface MediaInfo {
   path: string; name: string; size: number; duration: number;
   width: number; height: number; fps: number; codec: string;
-  hasAudio: boolean; format: VideoFormat; url: string;
+  hasAudio: boolean; format: VideoFormat; url: string; frameTimes?: number[];
+}
+export interface PreviewAsset {
+  path: string; url: string; format: OutputFormat; duration: number; time?: number;
+  playbackPath?: string; playbackUrl?: string;
 }
 export interface Settings { ffmpegPath: string; ffprobePath: string; outputDir: string; }
 export interface EngineStatus { ready: boolean; ffmpeg: string; ffprobe: string; version: string; error?: string; }
@@ -18,6 +22,7 @@ export interface ExportOptions {
   start: number; end: number; quality: 'high' | 'balanced' | 'small';
   mute: boolean; loop: boolean; fastTrim: boolean; outputDir: string;
   effects: VideoEffects; frameTime: number;
+  sourceStart?: number; sourceOffset?: number; gifFinalDelay?: number;
 }
 export interface JobProgress {
   id: string; state: 'running' | 'completed' | 'cancelled' | 'failed';
@@ -33,6 +38,10 @@ export interface DesktopAPI {
   selectExecutable(): Promise<string | null>;
   inspect(path: string): Promise<MediaInfo>;
   preview(path: string): Promise<string>;
+  framePreview(path: string, time: number): Promise<PreviewAsset>;
+  resultPreview(options: ExportOptions): Promise<PreviewAsset>;
+  cancelPreview(): Promise<void>;
+  openGithub(): Promise<void>;
   start(options: ExportOptions): Promise<JobProgress>;
   command(options: ExportOptions): Promise<string>;
   cancel(): Promise<void>;

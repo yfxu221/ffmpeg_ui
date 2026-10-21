@@ -71,6 +71,7 @@ export async function runSmoke(window: BrowserWindow) {
   await execute("(() => { const select = document.querySelector('[aria-label=\"裁切比例预设\"]'); select.value = '1'; select.dispatchEvent(new Event('change', { bubbles:true })); })()");
   await waitFor("Boolean(document.querySelector('.crop-rectangle'))");
   await execute("document.querySelector('.media-preview').scrollIntoView({block:'center',behavior:'instant'})");
+  await execute('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
   window.webContents.debugger.attach('1.3');
   const rect = await execute<{ x: number; y: number }>("(() => { const b = document.querySelector('.crop-rectangle').getBoundingClientRect(); return {x:b.x+b.width/2,y:b.y+b.height/2}; })()");
   const mouse = (type: string, x: number, y: number) => window.webContents.debugger.sendCommand('Input.dispatchMouseEvent', { type, x, y, button: type === 'mouseMoved' ? 'none' : 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: type === 'mouseMoved' ? 0 : 1 });
@@ -79,7 +80,11 @@ export async function runSmoke(window: BrowserWindow) {
   await mouse('mouseMoved', rect.x + 25, rect.y);
   await mouse('mouseReleased', rect.x + 25, rect.y);
   await new Promise(resolve => setTimeout(resolve, 100));
-  if (await execute<number>("Number(document.querySelector('[aria-label=\"裁切左侧 X\"]').value)") <= originalX) throw new Error('Crop drag did not update pixel coordinates.');
+  if (await execute<number>("Number(document.querySelector('[aria-label=\"裁切左侧 X\"]').value)") <= originalX) {
+    await screenshot('crop-drag-failure.png');
+    console.error('Crop hit test', await execute(`(() => { const b=document.querySelector('.crop-rectangle').getBoundingClientRect(); return {originalX:${originalX},rect:{x:b.x,y:b.y,width:b.width,height:b.height},hit:document.elementFromPoint(${rect.x},${rect.y})?.outerHTML}; })()`));
+    throw new Error('Crop drag did not update pixel coordinates.');
+  }
   const corner = await execute<{x:number;y:number}>("(() => { const b = document.querySelector('.crop-rectangle').getBoundingClientRect(); return {x:b.right-2,y:b.bottom-2}; })()");
   await mouse('mousePressed', corner.x, corner.y);
   await mouse('mouseMoved', corner.x - 20, corner.y - 15);

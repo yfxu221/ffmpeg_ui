@@ -3,8 +3,9 @@ import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { MediaEngine, capture, checkEngine, resolveBinaries, inspectMedia, buildArguments, displayCommand, validateOptions, stopCaptures } from './engine';
+import { MediaEngine, checkEngine, resolveBinaries, inspectMedia, buildArguments, displayCommand, validateOptions, stopCaptures } from './engine';
 import type { ExportOptions, JobProgress, Settings } from '../shared/types';
+import { PreviewManager } from './previews';
 
 if (process.env.FRAMEFORGE_USER_DATA) app.setPath('userData', path.resolve(process.env.FRAMEFORGE_USER_DATA));
 app.setAppUserModelId('studio.frameforge.desktop');
@@ -15,13 +16,13 @@ const approvedFiles = new Set<string>();
 const completedFiles = new Set<string>();
 let window: BrowserWindow;
 let settings: Settings = { ffmpegPath: '', ffprobePath: '', outputDir: '' };
-let previewDir = '';
+let previews: PreviewManager;
 let closing = false;
 let quitCleanupStarted = false;
 const bundledDir = () => path.join(process.resourcesPath, 'bin');
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
-const fileUrl = (input: string) => {
-  for (const [id, value] of mediaFiles) if (value === input) return `media://asset/${id}`;
+const fileUrl = (input: string, fresh = false) => {
+  if (!fresh) for (const [id, value] of mediaFiles) if (value === input) return `media://asset/${id}`;
   const id = randomUUID(); mediaFiles.set(id, input); return `media://asset/${id}`;
 };
 function authorizedFile(input: string) {
@@ -62,6 +63,7 @@ async function createWindow() {
 }
 
 async function initialize() {
+  previews = new PreviewManager(app.getPath('temp'));
   await fs.mkdir(app.getPath('userData'), { recursive: true });
   try {
     const saved = JSON.parse(await fs.readFile(settingsFile(), 'utf8'));
@@ -86,7 +88,7 @@ async function initialize() {
   });
   handle('engine:status', () => checkEngine(settings, bundledDir()));
   handle('dialog:file', async () => {
-    if (process.argv.includes('--smoke')) return path.resolve('.test-output/中文 空格 $素材.mp4');
+    if (process.argv.includes('--smoke')) return path.resolve(process.argv.includes('--smoke-gif') ? '.test-output/preview-tests/variable.gif' : '.test-output/中文 空格 $素材.mp4');
     const result = await dialog.showOpenDialog(window, { title: '打开 MP4 或 GIF', properties: ['openFile'], filters: [{ name: '视频和动画', extensions: ['mp4', 'gif'] }] });
     return result.canceled ? null : result.filePaths[0];
   });
@@ -102,17 +104,26 @@ async function initialize() {
     if (engine.busy) throw new Error('请先完成或取消当前任务。');
     const info = await inspectMedia(input, await resolveBinaries(settings, bundledDir()));
     approvedFiles.add(info.path);
-    return { ...info, url: fileUrl(info.path) };
+    return { ...info, url: fileUrl(info.path, true) };
   });
   handle('media:preview', async (input: string) => {
     authorizedFile(input);
-    if (engine.busy) throw new Error('请等待当前任务完成后生成预览。');
-    const binaries = await resolveBinaries(settings, bundledDir());
-    if (!previewDir) previewDir = await fs.mkdtemp(path.join(app.getPath('temp'), 'frameforge-preview-'));
-    const output = path.join(previewDir, `${randomUUID()}.mp4`);
-    await capture(binaries.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-nostdin', '-i', input, '-t', '30', '-map', '0:v:0', '-an', '-vf', "scale='min(960,iw)':-2,pad=ceil(iw/2)*2:ceil(ih/2)*2,fps=24", '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', output], 120000);
-    return fileUrl(output);
+    const asset = await previews.source(input, await resolveBinaries(settings, bundledDir()));
+    return fileUrl(asset.path);
   });
+  handle('preview:frame', async (input: string, time: number) => {
+    authorizedFile(input);
+    const asset = await previews.frame(input, time, await resolveBinaries(settings, bundledDir()));
+    return { ...asset, url: fileUrl(asset.path), playbackUrl: asset.playbackPath ? fileUrl(asset.playbackPath) : undefined };
+  });
+  handle('preview:result', async (options: ExportOptions) => {
+    authorizedFile(options?.input);
+    if (engine.busy) throw new Error('请等待导出完成后再生成结果预览。');
+    const asset = await previews.result(options, await resolveBinaries(settings, bundledDir()));
+    return { ...asset, url: fileUrl(asset.path), playbackUrl: asset.playbackPath ? fileUrl(asset.playbackPath) : undefined };
+  });
+  handle('preview:cancel', () => previews.cancelResult());
+  handle('app:github', () => shell.openExternal('https://github.com/yfxu221/ffmpeg_ui'));
   handle('job:start', async (options: ExportOptions) => {
     authorizedFile(options?.input);
     return engine.start(options, await resolveBinaries(settings, bundledDir()));
@@ -142,9 +153,13 @@ async function initialize() {
   });
   await createWindow();
   if (process.argv.includes('--smoke')) {
-    const { runSmoke } = await import('./smoke');
-    try { await runSmoke(window); app.exit(0); }
-    catch (error) { console.error(error); app.exit(1); }
+    await window.webContents.insertCSS('*{transition:none!important;scroll-behavior:auto!important;}');
+    const { runSmoke } = process.argv.includes('--smoke-gif') ? await import('./smoke-gif') : await import('./smoke');
+    try {
+      await runSmoke(window);
+      await window.webContents.executeJavaScript("document.querySelectorAll('video,audio').forEach(e => { e.pause(); e.removeAttribute('src'); e.load(); })");
+      await previews.dispose(); app.exit(0);
+    } catch (error) { console.error(error); await previews.dispose().catch(() => {}); app.exit(1); }
   }
 }
 
@@ -160,7 +175,7 @@ else {
     closing = true;
     stopCaptures();
     void engine.cancel().then(async () => {
-      if (previewDir) await fs.rm(previewDir, { recursive: true, force: true }).catch(() => {});
+      await previews?.dispose().catch(() => {});
     }).finally(() => app.quit());
   });
 }

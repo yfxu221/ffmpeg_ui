@@ -1,0 +1,75 @@
+import type { BrowserWindow } from 'electron';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { capture } from './engine';
+import { NEUTRAL_EFFECTS } from '../shared/geometry';
+import type { EngineStatus, PreviewAsset } from '../shared/types';
+
+export async function runSmoke(window: BrowserWindow) {
+  const root = path.resolve('.test-output');
+  const execute = <T = unknown>(code: string) => window.webContents.executeJavaScript(code) as Promise<T>;
+  const wait = async (condition: string) => {
+    for (let i=0;i<200;i++) { if (await execute<boolean>(condition)) return; await new Promise(resolve=>setTimeout(resolve,100)); }
+    throw new Error(`GIF smoke timeout: ${condition}`);
+  };
+  const click = (selector: string) => execute(`document.querySelector(${JSON.stringify(selector)}).click()`);
+  const setInput = (selector: string, value: string) => execute(`(() => { const input=document.querySelector(${JSON.stringify(selector)}); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(value)}); input.dispatchEvent(new Event('input',{bubbles:true})); })()`);
+  const screenshot = async (name: string) => {
+    await new Promise(resolve=>setTimeout(resolve,300));
+    await execute('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+    await fs.writeFile(path.join(root,name),(await window.webContents.capturePage()).toPNG());
+  };
+  await wait("document.body.innerText.includes('FFmpeg 已就绪')");
+  await click('.import-button');
+  await wait("document.querySelector('.media-file-row strong')?.textContent === 'variable.gif'");
+  await wait("document.querySelector('.source-stage video')?.readyState >= 2 && document.querySelector('.source-frame-image')?.naturalWidth > 0");
+  if (await execute<boolean>("document.querySelector('[aria-label=播放]').disabled")) throw new Error('GIF playback is disabled.');
+  await setInput('[aria-label="预览播放位置"]','0.3');
+  await wait("document.querySelector('.source-frame-image')?.alt.includes('00:00.100') && document.querySelector('.source-frame-image').naturalWidth > 0");
+  await click('[aria-label="下一帧"]');
+  await wait("document.querySelector('.source-frame-image')?.alt.includes('00:00.400')");
+  await click('[aria-label="上一帧"]');
+  await wait("document.querySelector('.source-frame-image')?.alt.includes('00:00.100')");
+  await execute("Array.from(document.querySelector('[aria-label=媒体工具]').querySelectorAll('button')).find(b=>b.textContent.includes('素材提取')).click()");
+  await wait("Boolean(document.querySelector('[aria-label=\"提取 PNG\"].selected'))");
+  await setInput('[aria-label="取帧时间（秒）"]','0.8');
+  await wait("document.querySelector('[aria-label=\"取帧时间（秒）\"]').value === '0.4' && document.querySelector('.source-frame-image')?.alt.includes('00:00.400')");
+  await screenshot('08-gif-frame.png');
+  await click('.preview-render-button');
+  await wait("document.querySelector('.result-stage[data-preview-format=png] img')?.naturalWidth > 0 && !document.querySelector('.preview-loading')");
+  const options = { input:path.join(root,'preview-tests/variable.gif'),tool:'extract',format:'png',width:0,fps:0,start:0,end:1.1,quality:'balanced',mute:false,loop:true,fastTrim:false,outputDir:path.join(root,'preview-tests'),effects:NEUTRAL_EFFECTS,frameTime:0.4 };
+  const preview = await execute<PreviewAsset>(`window.desktop.resultPreview(${JSON.stringify(options)})`);
+  if (await execute<string>("document.querySelector('.result-stage img').src") !== preview.url) throw new Error('UI preview does not match requested PNG.');
+  await click('.export-button');
+  await wait("Boolean(document.querySelector('.job-panel.completed')) || Boolean(document.querySelector('.job-panel.failed'))");
+  if (await execute<boolean>("Boolean(document.querySelector('.job-panel.failed'))")) throw new Error(await execute<string>("document.querySelector('.job-panel.failed').textContent"));
+  const output = await execute<string>("document.querySelector('.completed-details>span').title");
+  const engine = await execute<EngineStatus>('window.desktop.engineStatus()');
+  const hash = (file: string) => capture(engine.ffmpeg,['-v','error','-i',file,'-frames:v','1','-vf','format=rgb24','-f','md5','pipe:1']);
+  if (await hash(preview.path) !== await hash(output)) throw new Error('Previewed GIF frame differs from exported PNG.');
+  await setInput('[aria-label="取帧时间（秒）"]','0.1');
+  await wait("document.querySelector('.preview-notice')?.textContent.includes('参数已更新') && document.querySelector('.source-frame-image')?.alt.includes('00:00.100')");
+  if (!await execute<boolean>("document.querySelector('.preview-tabs button:nth-child(2)').disabled")) throw new Error('Stale preview was still selectable.');
+  await execute("Array.from(document.querySelector('[aria-label=媒体工具]').querySelectorAll('button')).find(b=>b.textContent.includes('片段截取')).click()");
+  await setInput('[aria-label="开始时间（秒）"]','0.1');
+  await setInput('[aria-label="结束时间（秒）"]','0.5');
+  await execute("document.querySelector('.preview-range-row button').click()");
+  await wait("document.querySelector('.preview-range-row button')?.textContent.includes('停止片段循环')");
+  await new Promise(resolve=>setTimeout(resolve,650));
+  const loopTime = await execute<number>("document.querySelector('.source-stage video').currentTime");
+  if (loopTime < 0.09 || loopTime > 0.55) throw new Error(`Selected clip playback escaped its bounds: ${loopTime}`);
+  await click('.preview-range-row button');
+  await click('.preview-render-button');
+  await wait("document.querySelector('.result-stage[data-preview-format=gif] video')?.readyState >= 2");
+  const duration = await execute<number>("document.querySelector('.result-stage video').duration");
+  if (duration > 0.6 || duration < 0.3) throw new Error(`Incorrect selected GIF preview duration: ${duration}`);
+  await execute("document.querySelector('.result-stage video').play()");
+  await new Promise(resolve=>setTimeout(resolve,120));
+  await execute("document.querySelector('.result-stage video').pause()");
+  await screenshot('09-gif-clip.png');
+  await execute("Array.from(document.querySelectorAll('button')).find(b=>b.textContent.includes('使用指南')).click()");
+  await wait("document.querySelector('.github-project a')?.href === 'https://github.com/yfxu221/ffmpeg_ui'");
+  await screenshot('10-github-guide.png');
+  await fs.writeFile(path.join(root,'gif-smoke-report.json'),JSON.stringify({ gifSeeking:true, variableFrameStepping:true, exactFramePreview:true, exportedFrameMatchesPreview:true, stalePreviewInvalidated:true, clipLoop:true, resultGifPlayer:true, clipDuration:duration, github:'https://github.com/yfxu221/ffmpeg_ui' },null,2));
+  console.log('GIF preview smoke passed.');
+}
